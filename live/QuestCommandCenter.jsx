@@ -1,5 +1,6 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import { Calendar, Hammer, Users, MessageSquare, Clock, DollarSign, Package, Plus, ChevronLeft, ChevronRight, Search, AlertTriangle, CheckCircle2, Truck, Send, X, MapPin, User, Eye, EyeOff, LogOut, Home, Wrench, FileText, ShieldCheck, ShieldAlert, Loader2, Navigation, Camera, Receipt, Upload, Sparkles, ChevronDown, ChevronUp, Wallet, TrendingUp, TrendingDown, Coffee } from 'lucide-react';
+import { deleteEntity, isMissingLiveTablesError, loadLiveData, upsertEntity } from './src/lib/liveDataStore';
 
 // ============================================================
 // QUEST — Job Command Center
@@ -201,6 +202,27 @@ const useStoredState = (key, initialValue) => {
   }, [key, value]);
 
   return [value, setValue];
+};
+
+const LiveDataStatus = ({ status, error }) => {
+  if (status === 'connected') return null;
+
+  const isSetupNeeded = status === 'setup-needed';
+  const color = isSetupNeeded ? T.accent : status === 'loading' ? T.blue : T.red;
+  const label = status === 'loading' ? 'CONNECTING TO SUPABASE' : isSetupNeeded ? 'SUPABASE SETUP NEEDED' : 'CACHE-ONLY MODE';
+  const message = status === 'loading'
+    ? 'Loading live company data...'
+    : isSetupNeeded
+      ? 'Run supabase/sql/002_beta_anon_persistence.sql in the Supabase SQL Editor, then refresh.'
+      : (error?.message || 'Live sync failed. Changes will stay in this browser cache until Supabase is reachable.');
+
+  return (
+    <div style={{ background: T.panel, borderBottom: `1px solid ${T.border}`, padding: '8px 20px', color: T.text, display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, letterSpacing: 1 }}>
+      {status === 'loading' ? <Loader2 size={13} style={{ color }} /> : <AlertTriangle size={13} style={{ color }} />}
+      <span style={{ color, fontWeight: 800 }}>{label}</span>
+      <span style={{ color: T.textDim, letterSpacing: 0 }}>{message}</span>
+    </div>
+  );
 };
 
 // Haversine distance in miles between two lat/lng points
@@ -4158,6 +4180,64 @@ export default function QuestApp() {
   const [view, setView] = useState('dash');
   const [focusedJobId, setFocusedJobId] = useState(null);
   const [jobs, setJobs] = useStoredState('quest-live-jobs', []);
+  const [team, setTeam] = useStoredState('quest-live-team', []);
+  const [timelog, setTimelog] = useStoredState('quest-live-timelog', []);
+  const [messages, setMessages] = useStoredState('quest-live-messages', []);
+  const [expenses, setExpenses] = useStoredState('quest-live-expenses', []);
+  const [dataStatus, setDataStatus] = useState('loading');
+  const [dataError, setDataError] = useState(null);
+  const [showTimeClock, setShowTimeClock] = useState(false);
+  const openEntry = role ? timelog.find(t => t.worker === role.name && !t.clockOut) : null;
+
+  useEffect(() => {
+    let cancelled = false;
+
+    loadLiveData()
+      .then((data) => {
+        if (cancelled) return;
+        setJobs(data.jobs || []);
+        setTeam(data.team || []);
+        setTimelog(data.timelog || []);
+        setExpenses(data.expenses || []);
+        setMessages(data.messages || []);
+        setDataStatus('connected');
+        setDataError(null);
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        console.error('Failed to load Supabase live data:', error);
+        setDataError(error);
+        setDataStatus(isMissingLiveTablesError(error) ? 'setup-needed' : 'cache-only');
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [setExpenses, setJobs, setMessages, setTeam, setTimelog]);
+
+  const reportSyncError = (error) => {
+    console.error('Failed to sync live data:', error);
+    setDataError(error);
+    setDataStatus(isMissingLiveTablesError(error) ? 'setup-needed' : 'cache-only');
+  };
+
+  const syncSave = (collection, entity) => {
+    upsertEntity(collection, entity)
+      .then(() => {
+        setDataStatus('connected');
+        setDataError(null);
+      })
+      .catch(reportSyncError);
+  };
+
+  const syncDelete = (collection, id) => {
+    deleteEntity(collection, id)
+      .then(() => {
+        setDataStatus('connected');
+        setDataError(null);
+      })
+      .catch(reportSyncError);
+  };
 
   // Add a brand new job
   const addJob = (jobData) => {
@@ -4172,27 +4252,28 @@ export default function QuestApp() {
       ...jobData,
     };
     setJobs(prev => [newJob, ...prev]);
+    syncSave('jobs', newJob);
   };
 
   // Update an existing job
   const updateJob = (jobId, patch) => {
+    const existingJob = jobs.find(j => j.id === jobId);
+    const updatedJob = existingJob ? { ...existingJob, ...patch } : null;
     setJobs(prev => prev.map(j => j.id === jobId ? { ...j, ...patch } : j));
+    if (updatedJob) syncSave('jobs', updatedJob);
   };
-  const [team, setTeam] = useStoredState('quest-live-team', []);
-  const [timelog, setTimelog] = useStoredState('quest-live-timelog', []);
-  const [messages, setMessages] = useStoredState('quest-live-messages', []);
-  const [expenses, setExpenses] = useStoredState('quest-live-expenses', []);
-  const [showTimeClock, setShowTimeClock] = useState(false);
-  const openEntry = role ? timelog.find(t => t.worker === role.name && !t.clockOut) : null;
 
-  const addMember = (member) => setTeam(prev => [member, ...prev]);
+  const addMember = (member) => {
+    setTeam(prev => [member, ...prev]);
+    syncSave('team', member);
+  };
 
   const handleClockIn = ({ worker, jobId, task, location, distance, verified, override, clockedInBy, adminEntry }) => {
     const time = fmtTime();
     const date = DEMO_TODAY; // demo date
     const workerName = worker || role.name;
     const workerMember = team.find(m => m.name === workerName);
-    setTimelog(prev => [...prev, {
+    const newEntry = {
       id: 'tl' + Date.now() + '_' + Math.random().toString(36).slice(2, 6),
       worker: workerName,
       jobId,
@@ -4209,46 +4290,78 @@ export default function QuestApp() {
       clockedInBy: clockedInBy || null,
       adminEntry: !!adminEntry,
       flagReason: !verified ? (override ? 'Manager override — outside geofence' : 'Outside geofence') : undefined,
-    }]);
+    };
+    setTimelog(prev => [...prev, newEntry]);
+    syncSave('timelog', newEntry);
   };
 
   const handleClockOut = (entryId, location, distance) => {
     const time = fmtTime();
-    setTimelog(prev => prev.map(t => {
-      if (t.id !== entryId) return t;
-      const closedBreaks = (t.breaks || []).map(b => b.end ? b : { ...b, end: time });
-      return {
-        ...t,
-        clockOut: time,
-        clockOutDistance: distance,
-        clockOutVerified: distance === null || distance === undefined ? t.verified : distance <= (jobs.find(j => j.id === t.jobId)?.geofenceMiles || 1),
-        breaks: closedBreaks,
-        hours: payableHours(t.clockIn, time, closedBreaks),
-        submitted: true,
-      };
-    }));
+    const entry = timelog.find(t => t.id === entryId);
+    if (!entry) return;
+    const closedBreaks = (entry.breaks || []).map(b => b.end ? b : { ...b, end: time });
+    const updatedEntry = {
+      ...entry,
+      clockOut: time,
+      clockOutDistance: distance,
+      clockOutVerified: distance === null || distance === undefined ? entry.verified : distance <= (jobs.find(j => j.id === entry.jobId)?.geofenceMiles || 1),
+      breaks: closedBreaks,
+      hours: payableHours(entry.clockIn, time, closedBreaks),
+      submitted: true,
+    };
+    setTimelog(prev => prev.map(t => t.id === entryId ? updatedEntry : t));
+    syncSave('timelog', updatedEntry);
   };
 
   const handleStartBreak = (entryId) => {
-    setTimelog(prev => prev.map(t => {
-      if (t.id !== entryId || t.clockOut || (t.breaks || []).some(b => !b.end)) return t;
-      return { ...t, breaks: [...(t.breaks || []), { id: 'br' + Date.now(), start: fmtTime(), end: null }] };
-    }));
+    const entry = timelog.find(t => t.id === entryId);
+    if (!entry || entry.clockOut || (entry.breaks || []).some(b => !b.end)) return;
+    const updatedEntry = { ...entry, breaks: [...(entry.breaks || []), { id: 'br' + Date.now(), start: fmtTime(), end: null }] };
+    setTimelog(prev => prev.map(t => t.id === entryId ? updatedEntry : t));
+    syncSave('timelog', updatedEntry);
   };
 
   const handleEndBreak = (entryId) => {
-    setTimelog(prev => prev.map(t => {
-      if (t.id !== entryId) return t;
-      return { ...t, breaks: (t.breaks || []).map(b => b.end ? b : { ...b, end: fmtTime() }) };
-    }));
+    const entry = timelog.find(t => t.id === entryId);
+    if (!entry) return;
+    const updatedEntry = { ...entry, breaks: (entry.breaks || []).map(b => b.end ? b : { ...b, end: fmtTime() }) };
+    setTimelog(prev => prev.map(t => t.id === entryId ? updatedEntry : t));
+    syncSave('timelog', updatedEntry);
   };
 
-  const handleAddExpense = (exp) => setExpenses(prev => [exp, ...prev]);
-  const handleUpdateExpense = (id, patch) => setExpenses(prev => prev.map(e => e.id === id ? { ...e, ...patch } : e));
-  const handleDeleteExpense = (id) => setExpenses(prev => prev.filter(e => e.id !== id));
+  const handleAddExpense = (exp) => {
+    setExpenses(prev => [exp, ...prev]);
+    syncSave('expenses', exp);
+  };
 
-  const handleUpdateEntry = (id, patch) => setTimelog(prev => prev.map(t => t.id === id ? { ...t, ...patch } : t));
-  const handleDeleteEntry = (id) => setTimelog(prev => prev.filter(t => t.id !== id));
+  const handleUpdateExpense = (id, patch) => {
+    const expense = expenses.find(e => e.id === id);
+    const updatedExpense = expense ? { ...expense, ...patch } : null;
+    setExpenses(prev => prev.map(e => e.id === id ? { ...e, ...patch } : e));
+    if (updatedExpense) syncSave('expenses', updatedExpense);
+  };
+
+  const handleDeleteExpense = (id) => {
+    setExpenses(prev => prev.filter(e => e.id !== id));
+    syncDelete('expenses', id);
+  };
+
+  const handleUpdateEntry = (id, patch) => {
+    const entry = timelog.find(t => t.id === id);
+    const updatedEntry = entry ? { ...entry, ...patch } : null;
+    setTimelog(prev => prev.map(t => t.id === id ? { ...t, ...patch } : t));
+    if (updatedEntry) syncSave('timelog', updatedEntry);
+  };
+
+  const handleDeleteEntry = (id) => {
+    setTimelog(prev => prev.filter(t => t.id !== id));
+    syncDelete('timelog', id);
+  };
+
+  const handleSendMessage = (message) => {
+    setMessages(prev => [...prev, message]);
+    syncSave('messages', message);
+  };
 
   const gotoJob = (id) => {
     setFocusedJobId(id);
@@ -4260,6 +4373,7 @@ export default function QuestApp() {
   return (
     <div style={{ minHeight: '100vh', background: T.bg, color: T.text, fontFamily: "'Helvetica Neue', Arial, sans-serif" }}>
       <TopBar role={role} openEntry={openEntry} onOpenTimeClock={() => setShowTimeClock(true)} onLogout={() => { setRole(null); setView('dash'); setFocusedJobId(null); }} view={view} setView={(v) => { setView(v); if (v !== 'jobs') setFocusedJobId(null); }} />
+      <LiveDataStatus status={dataStatus} error={dataError} />
       {view === 'dash'      && <Dashboard jobs={jobs} role={role} gotoJob={gotoJob} setView={setView} team={team} timelog={timelog} expenses={expenses} />}
       {view === 'jobs'      && <JobsView jobs={jobs} role={role} focusedJobId={focusedJobId} setFocusedJobId={setFocusedJobId} expenses={expenses} timelog={timelog} team={team} onAddJob={addJob} />}
       {view === 'cal'       && <CalendarView jobs={jobs} gotoJob={gotoJob} />}
@@ -4269,7 +4383,7 @@ export default function QuestApp() {
       {view === 'expenses'  && <ExpensesView expenses={expenses} jobs={jobs} role={role} onAdd={handleAddExpense} onUpdate={handleUpdateExpense} onDelete={handleDeleteExpense} />}
       {view === 'payroll'   && <PayrollView team={team} timelog={timelog} jobs={jobs} role={role} />}
       {view === 'completed' && <CompletedView jobs={jobs} expenses={expenses} timelog={timelog} team={team} role={role} />}
-      {view === 'chat'      && <ChatView messages={messages} jobs={jobs} role={role} onSend={(m) => setMessages([...messages, m])} />}
+      {view === 'chat'      && <ChatView messages={messages} jobs={jobs} role={role} onSend={handleSendMessage} />}
       {showTimeClock && (
         <ClockInModal
           jobs={jobs}
