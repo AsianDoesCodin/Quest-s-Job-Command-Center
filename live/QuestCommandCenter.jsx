@@ -182,6 +182,27 @@ const payableHours = (clockIn, clockOut, breaks = []) => {
   return Math.round(Math.max(0, clockHoursBetween(clockIn, clockOut) - breakHours(breaks)) * 10) / 10;
 };
 
+const useStoredState = (key, initialValue) => {
+  const [value, setValue] = useState(() => {
+    try {
+      const raw = window.localStorage.getItem(key);
+      return raw ? JSON.parse(raw) : initialValue;
+    } catch {
+      return initialValue;
+    }
+  });
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(key, JSON.stringify(value));
+    } catch {
+      // Storage can fail in private browsing or locked-down webviews; keep the in-memory state.
+    }
+  }, [key, value]);
+
+  return [value, setValue];
+};
+
 // Haversine distance in miles between two lat/lng points
 const distanceMiles = (lat1, lng1, lat2, lng2) => {
   const R = 3958.8; // earth radius in miles
@@ -1670,13 +1691,15 @@ function LookAheadView({ jobs, gotoJob }) {
 // ============================================================
 // VIEW — TEAM
 // ============================================================
-function TeamView({ team, jobs, role, timelog }) {
+function TeamView({ team, jobs, role, timelog, onAddMember }) {
+  const [showAdd, setShowAdd] = useState(false);
+
   return (
     <div style={{ padding: 20 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
         <div style={{ fontSize: 24, fontWeight: 800 }}>Team</div>
         {role.canEdit && (
-          <button style={{ background: T.accent, color: '#000', border: 'none', padding: '8px 14px', fontWeight: 700, fontSize: 13, letterSpacing: 1, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6 }}>
+          <button onClick={() => setShowAdd(true)} style={{ background: T.accent, color: '#000', border: 'none', padding: '8px 14px', fontWeight: 700, fontSize: 13, letterSpacing: 1, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6 }}>
             <Plus size={13} /> ADD MEMBER
           </button>
         )}
@@ -1689,6 +1712,11 @@ function TeamView({ team, jobs, role, timelog }) {
       )}
 
       <div style={{ display: 'grid', gap: 8 }}>
+        {team.length === 0 && (
+          <div style={{ background: T.panel, border: `1px solid ${T.border}`, padding: 24, textAlign: 'center', color: T.textDim, fontSize: 14 }}>
+            No team members yet. Use <span style={{ color: T.accent, fontWeight: 700 }}>ADD MEMBER</span> to build the live roster.
+          </div>
+        )}
         {team.map(m => {
           const memberJobs = jobs.filter(j => j.crew.includes(m.name));
           const totalHours = timelog.filter(t => t.worker === m.name).reduce((s, t) => s + t.hours, 0);
@@ -1721,6 +1749,113 @@ function TeamView({ team, jobs, role, timelog }) {
             </div>
           );
         })}
+      </div>
+
+      {showAdd && (
+        <AddTeamMemberModal
+          onClose={() => setShowAdd(false)}
+          onAdd={(member) => {
+            onAddMember(member);
+            setShowAdd(false);
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+function AddTeamMemberModal({ onClose, onAdd }) {
+  const [name, setName] = useState('');
+  const [tradeRole, setTradeRole] = useState('Roofer');
+  const [payType, setPayType] = useState('hourly');
+  const [payAmount, setPayAmount] = useState('');
+  const [color, setColor] = useState(T.accent);
+  const [error, setError] = useState('');
+
+  const initialsFor = (value) => value
+    .trim()
+    .split(/\s+/)
+    .map(part => part[0])
+    .join('')
+    .toUpperCase()
+    .slice(0, 2) || 'TM';
+
+  const save = () => {
+    const trimmedName = name.trim();
+    const numericPay = Number(payAmount);
+    if (!trimmedName) {
+      setError('Name is required.');
+      return;
+    }
+    if (!Number.isFinite(numericPay) || numericPay < 0) {
+      setError('Enter a valid pay amount.');
+      return;
+    }
+
+    onAdd({
+      id: 'tm' + Date.now(),
+      name: trimmedName,
+      role: tradeRole.trim() || 'Field Worker',
+      payType,
+      payAmount: numericPay,
+      initials: initialsFor(trimmedName),
+      color,
+      active: true,
+    });
+  };
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.85)', zIndex: 100, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16 }} onClick={onClose}>
+      <div onClick={e => e.stopPropagation()} style={{ background: T.panel, border: `1px solid ${T.borderHi}`, maxWidth: 460, width: '100%' }}>
+        <div style={{ padding: '14px 18px', borderBottom: `2px solid ${T.accent}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div>
+            <div style={{ fontSize: 12, color: T.accent, letterSpacing: 2, fontWeight: 800 }}>QUEST</div>
+            <div style={{ fontSize: 18, fontWeight: 800 }}>ADD TEAM MEMBER</div>
+          </div>
+          <button onClick={onClose} style={{ background: 'transparent', border: 'none', color: T.textDim, cursor: 'pointer' }}><X size={18} /></button>
+        </div>
+
+        <div style={{ padding: 18 }}>
+          {error && (
+            <div style={{ background: '#2d0e0e', borderLeft: `3px solid ${T.red}`, color: T.red, padding: 10, marginBottom: 12, fontSize: 13 }}>
+              {error}
+            </div>
+          )}
+
+          <div style={{ marginBottom: 12 }}>
+            <div style={{ fontSize: 12, color: T.textDim, letterSpacing: 1, marginBottom: 4 }}>NAME</div>
+            <input value={name} onChange={e => setName(e.target.value)} placeholder="Worker name" style={{ width: '100%', background: T.panel2, border: `1px solid ${T.border}`, color: T.text, padding: '10px 12px', fontSize: 15, fontFamily: 'inherit' }} />
+          </div>
+
+          <div style={{ marginBottom: 12 }}>
+            <div style={{ fontSize: 12, color: T.textDim, letterSpacing: 1, marginBottom: 4 }}>ROLE / TRADE</div>
+            <input value={tradeRole} onChange={e => setTradeRole(e.target.value)} placeholder="Roofer, Foreman, Carpenter..." style={{ width: '100%', background: T.panel2, border: `1px solid ${T.border}`, color: T.text, padding: '10px 12px', fontSize: 15, fontFamily: 'inherit' }} />
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 12 }}>
+            <div>
+              <div style={{ fontSize: 12, color: T.textDim, letterSpacing: 1, marginBottom: 4 }}>PAY TYPE</div>
+              <select value={payType} onChange={e => setPayType(e.target.value)} style={{ width: '100%', background: T.panel2, border: `1px solid ${T.border}`, color: T.text, padding: '10px 12px', fontSize: 15, fontFamily: 'inherit' }}>
+                <option value="hourly">Hourly</option>
+                <option value="daily">Daily</option>
+                <option value="salary">Salary</option>
+              </select>
+            </div>
+            <div>
+              <div style={{ fontSize: 12, color: T.textDim, letterSpacing: 1, marginBottom: 4 }}>PAY AMOUNT</div>
+              <input type="number" min="0" step="0.01" value={payAmount} onChange={e => setPayAmount(e.target.value)} placeholder="0.00" style={{ width: '100%', background: T.panel2, border: `1px solid ${T.border}`, color: T.text, padding: '10px 12px', fontSize: 15, fontFamily: 'inherit' }} />
+            </div>
+          </div>
+
+          <div style={{ marginBottom: 16 }}>
+            <div style={{ fontSize: 12, color: T.textDim, letterSpacing: 1, marginBottom: 4 }}>COLOR</div>
+            <input type="color" value={color} onChange={e => setColor(e.target.value)} style={{ width: 54, height: 34, background: T.panel2, border: `1px solid ${T.border}`, cursor: 'pointer' }} />
+          </div>
+
+          <button onClick={save} style={{ width: '100%', background: T.accent, color: '#000', border: 'none', padding: '12px', fontWeight: 800, fontSize: 14, letterSpacing: 1, cursor: 'pointer' }}>
+            ADD MEMBER
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -4022,7 +4157,7 @@ export default function QuestApp() {
   const [role, setRole] = useState(null);
   const [view, setView] = useState('dash');
   const [focusedJobId, setFocusedJobId] = useState(null);
-  const [jobs, setJobs] = useState([]);
+  const [jobs, setJobs] = useStoredState('quest-live-jobs', []);
 
   // Add a brand new job
   const addJob = (jobData) => {
@@ -4043,12 +4178,14 @@ export default function QuestApp() {
   const updateJob = (jobId, patch) => {
     setJobs(prev => prev.map(j => j.id === jobId ? { ...j, ...patch } : j));
   };
-  const [team] = useState([]);
-  const [timelog, setTimelog] = useState([]);
-  const [messages, setMessages] = useState([]);
-  const [expenses, setExpenses] = useState([]);
+  const [team, setTeam] = useStoredState('quest-live-team', []);
+  const [timelog, setTimelog] = useStoredState('quest-live-timelog', []);
+  const [messages, setMessages] = useStoredState('quest-live-messages', []);
+  const [expenses, setExpenses] = useStoredState('quest-live-expenses', []);
   const [showTimeClock, setShowTimeClock] = useState(false);
   const openEntry = role ? timelog.find(t => t.worker === role.name && !t.clockOut) : null;
+
+  const addMember = (member) => setTeam(prev => [member, ...prev]);
 
   const handleClockIn = ({ worker, jobId, task, location, distance, verified, override, clockedInBy, adminEntry }) => {
     const time = fmtTime();
@@ -4127,7 +4264,7 @@ export default function QuestApp() {
       {view === 'jobs'      && <JobsView jobs={jobs} role={role} focusedJobId={focusedJobId} setFocusedJobId={setFocusedJobId} expenses={expenses} timelog={timelog} team={team} onAddJob={addJob} />}
       {view === 'cal'       && <CalendarView jobs={jobs} gotoJob={gotoJob} />}
       {view === 'lookahead' && <LookAheadView jobs={jobs} gotoJob={gotoJob} />}
-      {view === 'team'      && <TeamView team={team} jobs={jobs} role={role} timelog={timelog} />}
+      {view === 'team'      && <TeamView team={team} jobs={jobs} role={role} timelog={timelog} onAddMember={addMember} />}
       {view === 'time'      && <TimeLogView timelog={timelog} jobs={jobs} team={team} role={role} onClockIn={handleClockIn} onClockOut={handleClockOut} onStartBreak={handleStartBreak} onEndBreak={handleEndBreak} onUpdateEntry={handleUpdateEntry} onDeleteEntry={handleDeleteEntry} onOpenTimeClock={() => setShowTimeClock(true)} />}
       {view === 'expenses'  && <ExpensesView expenses={expenses} jobs={jobs} role={role} onAdd={handleAddExpense} onUpdate={handleUpdateExpense} onDelete={handleDeleteExpense} />}
       {view === 'payroll'   && <PayrollView team={team} timelog={timelog} jobs={jobs} role={role} />}
