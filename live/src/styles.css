@@ -1,0 +1,21 @@
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  background: #0a0a0a;
+}
+
+button,
+select,
+input,
+textarea {
+  border-radius: 0;
+}
